@@ -1,2 +1,2 @@
 
-from .similarity import cosine_similarity
+from .similarity import cosine_similarity, normalize_embedding
