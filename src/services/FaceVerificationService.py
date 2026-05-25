@@ -19,7 +19,7 @@ class FaceVerificationService:
 
         return max(
             faces,
-            key=lambda face: float(getattr(face, "det_score", 0.0))
+            key=lambda face: float(getattr(faces, "det_score", 0.0))
         )
 
     def verify_faces(self, id_image, selfie_image):
