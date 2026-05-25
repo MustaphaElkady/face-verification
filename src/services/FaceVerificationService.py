@@ -1,104 +1,239 @@
 from insightface.app import FaceAnalysis
-import logging
-
+from quality import QualityPipeline
 from utils.similarity import cosine_similarity, normalize_embedding
 from preprocessing.crop import crop_face
 from preprocessing.color import normalize_channels
+from pathlib import Path
 from vision.align import align_face
+import logging
 
 
 class FaceVerificationService:
     def __init__(self):
         self.app = FaceAnalysis(name="buffalo_l")
-        self.app.prepare(ctx_id=0)  # CPU
+        self.app.prepare(ctx_id=1)  # GPU
+        self.quality = QualityPipeline()
         self.logger = logging.getLogger(__name__)
 
+    # Face Selection
     def _pick_best_face(self, faces):
         if not faces:
             return None
 
         return max(
             faces,
-            key=lambda face: float(getattr(faces, "det_score", 0.0))
+            key=lambda face: float(getattr(face, "det_score", 0.0))
         )
 
-    def verify_faces(self, id_image, selfie_image):
-        # 1) Normalize image channels
-        id_image = normalize_channels(id_image)
-        selfie_image = normalize_channels(selfie_image)
-
-        # 2) First face detection pass
-        id_faces = self.app.get(id_image)
-        selfie_faces = self.app.get(selfie_image)
-
-        if len(id_faces) == 0:
+    # face detection
+    def _detect_face(self, image, image_name= "image"):
+        faces = self.app.get(image)
+        if len(faces) == 0:
             raise ValueError(
-                "No face detected in document image. Please upload a clearer photo."
+                f"No face detected in {image_name}. Please upload a clearer photo."
+            )
+        best_face = self._pick_best_face(faces)
+        if best_face is None:
+            raise ValueError(
+                f"Could not select a valid face from {image_name}."
+            )
+        return best_face
+
+
+    # IMAGE QUALITY VALIDATION
+    def _validate_image_quality(self, image, image_name = "image", image_type = "selfie"):
+        quality_results = self.quality.validate_image(image, image_type=image_type)
+        if not quality_results.passed:
+            raise ValueError(
+                f"Quality check failed for {image_name}: {quality_results.message}"
+            )
+    # FACE QUALITY VALIDATION
+    def _validate_face_quality(self, image, face, image_name = "image"):
+        quality_results = self.quality.validate_face(image, face)
+        if not quality_results.passed:
+            raise ValueError(
+                f"Quality check failed for {image_name}: {quality_results.message}"
             )
 
-        if len(selfie_faces) == 0:
+    # FACE ALIGNMENT
+    def _align_face_image(
+        self,
+        image,
+        face
+    ):
+        """
+        Align image using face landmarks.
+        """
+
+        if face.kps is None:
+
             raise ValueError(
-                "No face detected in selfie image. Please upload a clearer selfie."
+                "Face landmarks not found."
             )
 
-        # 3) Pick the best face from each image
-        id_face = self._pick_best_face(id_faces)
-        selfie_face = self._pick_best_face(selfie_faces)
+        aligned_image = align_face(
+            image=image,
+            keypoints=face.kps
+        )
 
-        if id_face is None or selfie_face is None:
-            raise ValueError("Could not select a valid face.")
+        return aligned_image
 
-        # 4) Align the full images using facial landmarks
-        id_aligned = align_face(id_image, id_face.kps)
-        selfie_aligned = align_face(selfie_image, selfie_face.kps)
+    # EMBEDDING EXTRACTION
+    def _extract_embedding(
+        self,
+        image,
+        image_name = "image"
+    ):
+        face = self._detect_face(
+            image=image,
+            image_name=image_name
+        )
 
-        # 5) Detect again after alignment
-        id_aligned_faces = self.app.get(id_aligned)
-        selfie_aligned_faces = self.app.get(selfie_aligned)
+        embedding = face.embedding
 
-        if len(id_aligned_faces) == 0:
-            raise ValueError("No face detected after alignment in document image.")
+        if embedding is None:
 
-        if len(selfie_aligned_faces) == 0:
-            raise ValueError("No face detected after alignment in selfie image.")
+            raise ValueError(
+                f"Embedding extraction failed for {image_name}."
+            )
 
-        # 6) Pick final aligned face
-        id_face_final = self._pick_best_face(id_aligned_faces)
-        selfie_face_final = self._pick_best_face(selfie_aligned_faces)
+        embedding = normalize_embedding(
+            embedding
+        )
 
-        if id_face_final is None or selfie_face_final is None:
-            raise ValueError("Could not select a valid aligned face.")
+        return embedding, face
 
-        # 7) Optional crop for debugging/inspection
-        # You do NOT need to use this crop for the embedding if the aligned face is already good.
-        id_face_crop = crop_face(id_aligned, id_face_final.bbox)
-        selfie_face_crop = crop_face(selfie_aligned, selfie_face_final.bbox)
+    # =====================================================
+    # MAIN VERIFICATION PIPELINE
+    # =====================================================
 
-        # 8) Use embeddings from aligned detections
-        emb1 = id_face_final.embedding
-        emb2 = selfie_face_final.embedding
+    def verify_faces(
+        self,
+        id_image,
+        selfie_image,
+        image_type_id = "document",
+        image_type_selfie = "selfie"
+    ):
 
-        if emb1 is None or emb2 is None:
-            raise ValueError("Embedding extraction failed.")
+        # -------------------------------------------------
+        # 1. Normalize Channels
+        # -------------------------------------------------
 
-        # 9) Normalize embeddings
-        emb1 = normalize_embedding(emb1)
-        emb2 = normalize_embedding(emb2)
+        id_image = normalize_channels(
+            id_image
+        )
 
-        # 10) Similarity
-        similarity = cosine_similarity(emb1, emb2)
+        selfie_image = normalize_channels(
+            selfie_image
+        )
 
-        # 11) Threshold
+        # 2. Validate Image Quality
+        self._validate_image_quality(
+            id_image,
+            "document image",
+            image_type=image_type_id
+        )
+        self._validate_image_quality(
+            selfie_image,
+            "selfie image",
+            image_type=image_type_selfie
+        )
+
+        # 3. Detect Faces
+        id_face = self._detect_face(
+            id_image,
+            "document image"
+        )
+        selfie_face = self._detect_face(
+            selfie_image,
+            "selfie image"
+        )
+
+        # 4. Face Quality Validation
+        self._validate_face_quality(
+            id_image,
+            id_face,
+            "document image"
+        )
+        self._validate_face_quality(
+            selfie_image,
+            selfie_face,
+            "selfie image"
+        )
+
+        # 5. Align Faces
+        id_aligned = self._align_face_image(
+            id_image,
+            id_face
+        )
+        selfie_aligned = self._align_face_image(
+            selfie_image,
+            selfie_face
+        )
+
+        # 6. Extract Embeddings
+        emb1, id_face_final = self._extract_embedding(
+            id_aligned,
+            "aligned document image"
+        )
+        emb2, selfie_face_final = self._extract_embedding(
+            selfie_aligned,
+            "aligned selfie image"
+        )
+
+        # 7. Optional Face Crops
+        id_crop = crop_face(
+            id_aligned,
+            id_face_final.bbox
+        )
+        selfie_crop = crop_face(
+            selfie_aligned,
+            selfie_face_final.bbox
+        )
+
+        # 8. Similarity Calculation
+        similarity = cosine_similarity(
+            emb1,
+            emb2
+        )
+
+        # 9. Verification Decision
         threshold = 0.63
-        verified = bool(similarity >= threshold)
+
+        verified = bool(
+            similarity >= threshold
+        )
+
+        # 10. Logging
 
         self.logger.info(
-            "Verification done | similarity=%.4f | verified=%s",
+            (
+                "Verification completed | "
+                "similarity=%.4f | "
+                "verified=%s"
+            ),
             similarity,
             verified
         )
 
+        # 11. Response
+
         return {
             "verified": verified,
-            "similarity": round(float(similarity), 4)
+
+            "similarity": round(
+                float(similarity),
+                4
+            ),
+
+            "threshold": threshold,
+
+            "debug": {
+
+                "document_det_score":
+                    float(id_face_final.det_score),
+
+                "selfie_det_score":
+                    float(selfie_face_final.det_score),
+            }
         }

@@ -1,15 +1,14 @@
 from pathlib import Path
 import sys
-
 import streamlit as st
 
 # Add /src to the Python path
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from services.FaceVerificationService import FaceVerificationService
+from services import FaceVerificationService
 from helpers.image import bytes_to_cv2_image
 from src.core import settings
 
