@@ -1,5 +1,3 @@
 from .config import settings
-
-__all__ = [
-    "settings"
-]
+from . import logging as _logging_setup  # noqa
+__all__ = ["settings"]
