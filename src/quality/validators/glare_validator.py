@@ -1,11 +1,12 @@
 import cv2
 import numpy as np
 from ..quality_enums import ValidationResult
+from core.config import settings
 
 
 class GlareValidator:
-    def __init__(self, glare_threshold: float = 0.08):
-        self.glare_threshold = glare_threshold
+    def __init__(self):
+        self.glare_threshold = settings.glare_threshold
 
     def validate(self, image, face=None) -> ValidationResult:
         if face is not None:
@@ -28,7 +29,7 @@ class GlareValidator:
             return ValidationResult(
                 passed=False,
                 code="GLARE_DETECTED",
-                message="Too much glare detected. Please retake the image.",
+                message="Too much glare detected. Please retake the image. ",
                 metrics={"glare_ratio": glare_ratio, "glare_threshold": self.glare_threshold},
             )
 

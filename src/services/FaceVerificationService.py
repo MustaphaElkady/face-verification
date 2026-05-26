@@ -156,7 +156,11 @@ class FaceVerificationService:
         selfie_face = self._pick_best_face(selfie_faces)
 
         # ── 6. Face-level quality check ───────────────────────────────────────
-        id_face_q = self._quality.validate_face(id_image, id_face)   # no image_type
+        id_face_q = self._quality.validate_face(
+            id_image,
+            id_face,
+            image_type="document",
+        )
         quality_metrics["id_face"] = id_face_q.metrics
         if not id_face_q.passed:
             raise QualityCheckError(
@@ -165,7 +169,11 @@ class FaceVerificationService:
                 metrics=id_face_q.metrics,
             )
 
-        selfie_face_q = self._quality.validate_face(selfie_image, selfie_face)   # no image_type
+        selfie_face_q = self._quality.validate_face(
+            selfie_image,
+            selfie_face,
+            image_type="selfie",
+        )
         quality_metrics["selfie_face"] = selfie_face_q.metrics
         if not selfie_face_q.passed:
             raise QualityCheckError(

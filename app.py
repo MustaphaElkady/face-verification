@@ -38,7 +38,7 @@ with col1:
         type=["jpg", "jpeg", "png", "webp"]
     )
     if id_file is not None:
-        st.image(id_file, caption="ID Image", width="stretch")
+        st.image(id_file, caption="ID Image",use_container_width=True)
 
 with col2:
     selfie_file = st.file_uploader(
@@ -46,7 +46,7 @@ with col2:
         type=["jpg", "jpeg", "png", "webp"]
     )
     if selfie_file is not None:
-        st.image(selfie_file, caption="Selfie Image", width="stretch")
+        st.image(selfie_file, caption="Selfie Image",use_container_width=True)
 
 if st.button("Verify Faces"):
     if id_file is None or selfie_file is None:

@@ -2,8 +2,8 @@ from quality.quality_enums import ValidationResult
 from core.config import settings
 
 class OcclusionValidator:
-    def __init__(self, min_det_score: float = None):
-        self.min_det_score = min_det_score or settings.min_det_score
+    def __init__(self):
+        self.min_det_score = settings.min_det_score
 
     def validate(self, image, face=None, image_type: str = "selfie") -> ValidationResult:
         if face is None:

@@ -1,9 +1,9 @@
 from ..quality_enums import ValidationResult
-
+from core.config import settings
 
 class FaceSizeValidator:
     def __init__(self, min_face_ratio: float = 0.04):
-        self.min_face_ratio = min_face_ratio
+        self.min_face_ratio = settings.min_face_ratio
 
     def validate(self, image, face=None) -> ValidationResult:
         if face is None:
