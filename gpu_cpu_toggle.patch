@@ -1,0 +1,813 @@
+diff -ruN face-verification/src/core/config.py face-verification-patched/src/core/config.py
+--- face-verification/src/core/config.py	2026-05-25 04:22:58.000000000 +0000
++++ face-verification-patched/src/core/config.py	2026-05-25 22:20:29.333459831 +0000
+@@ -1,36 +1,47 @@
+-from dataclasses import dataclass
+-import os
+-try:
+-    from dotenv import load_dotenv
+-    load_dotenv()
+-except ImportError:
+-    pass
+-
+-class Settings:
+-    # Model
+-    model_backend: str = os.getenv("FACE_MODEL_BACKEND", "insightface")
+-    model_name: str = os.getenv("FACE_MODEL_NAME", "buffalo_l")
+-    use_gpu: bool = os.getenv("USE_GPU", "false").lower() == "true"
+-
+-    # Thresholds
+-    similarity_threshold: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.57"))
+-    manual_review_threshold: float = float(os.getenv("MANUAL_REVIEW_THRESHOLD", "0.45"))
+-    min_det_score: float = float(os.getenv("MIN_DET_SCORE", "0.85"))
+-
+-    # Image limits
+-    max_image_size_mb: float = float(os.getenv("MAX_IMAGE_SIZE_MB", "10.0"))
+-    max_image_dimension: int = int(os.getenv("MAX_IMAGE_DIMENSION", "4096"))
+-
+-    # Quality thresholds
+-    blur_threshold_selfie: float = float(os.getenv("BLUR_THRESHOLD_SELFIE", "60"))
+-    blur_threshold_document: float = float(os.getenv("BLUR_THRESHOLD_DOCUMENT", "20"))
+-    brightness_low: float = float(os.getenv("BRIGHTNESS_LOW", "55"))
+-    brightness_high: float = float(os.getenv("BRIGHTNESS_HIGH", "235"))
+-    glare_ratio: float = float(os.getenv("GLARE_RATIO", "0.08"))
+-    min_face_ratio: float = float(os.getenv("MIN_FACE_RATIO", "0.04"))
+-
+-    # API
+-    api_host: str = os.getenv("API_HOST", "0.0.0.0")
+-    api_port: int = int(os.getenv("API_PORT", "8000"))
+-
+-settings = Settings()
+\ No newline at end of file
++from dataclasses import dataclass
++import os
++
++try:
++    from dotenv import load_dotenv
++    load_dotenv()
++except ImportError:
++    pass
++
++
++def env_bool(name: str, default: bool = False) -> bool:
++    """Read a boolean from .env: true/false, 1/0, yes/no, on/off."""
++    raw = os.getenv(name)
++    if raw is None:
++        return default
++    return raw.strip().strip('"').strip("'").lower() in {"1", "true", "yes", "y", "on"}
++
++
++class Settings:
++    # Model
++    model_backend: str = os.getenv("FACE_MODEL_BACKEND", "insightface")
++    model_name: str = os.getenv("FACE_MODEL_NAME", "buffalo_l")
++    use_gpu: bool = env_bool("USE_GPU", False)
++
++    # Thresholds
++    similarity_threshold: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.57"))
++    manual_review_threshold: float = float(os.getenv("MANUAL_REVIEW_THRESHOLD", "0.45"))
++    min_det_score: float = float(os.getenv("MIN_DET_SCORE", "0.85"))
++
++    # Image limits
++    max_image_size_mb: float = float(os.getenv("MAX_IMAGE_SIZE_MB", "10.0"))
++    max_image_dimension: int = int(os.getenv("MAX_IMAGE_DIMENSION", "4096"))
++
++    # Quality thresholds
++    blur_threshold_selfie: float = float(os.getenv("BLUR_THRESHOLD_SELFIE", "60"))
++    blur_threshold_document: float = float(os.getenv("BLUR_THRESHOLD_DOCUMENT", "20"))
++    brightness_low: float = float(os.getenv("BRIGHTNESS_LOW", "55"))
++    brightness_high: float = float(os.getenv("BRIGHTNESS_HIGH", "235"))
++    glare_ratio: float = float(os.getenv("GLARE_RATIO", "0.08"))
++    min_face_ratio: float = float(os.getenv("MIN_FACE_RATIO", "0.04"))
++
++    # API
++    api_host: str = os.getenv("API_HOST", "0.0.0.0")
++    api_port: int = int(os.getenv("API_PORT", "8000"))
++
++
++settings = Settings()
+diff -ruN face-verification/src/core/device.py face-verification-patched/src/core/device.py
+--- face-verification/src/core/device.py	1970-01-01 00:00:00.000000000 +0000
++++ face-verification-patched/src/core/device.py	2026-05-25 22:20:29.339416863 +0000
+@@ -0,0 +1,77 @@
++"""Central device selection for CPU/GPU runtime.
++
++USE_GPU=false -> force CPU for InsightFace/ONNXRuntime, AdaFace/PyTorch, and EasyOCR.
++USE_GPU=true  -> use GPU when CUDA dependencies are available, otherwise fall back to CPU
++                 with a clear warning in logs.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import List, Tuple
++
++from core.config import settings
++
++logger = logging.getLogger(__name__)
++
++
++def torch_cuda_available() -> bool:
++    """Return True only when USE_GPU=true and PyTorch can see CUDA."""
++    if not settings.use_gpu:
++        return False
++
++    try:
++        import torch
++
++        available = bool(torch.cuda.is_available())
++        if not available:
++            logger.warning("USE_GPU=true but torch.cuda.is_available() is False. Using CPU for torch/EasyOCR.")
++        return available
++    except Exception as exc:
++        logger.warning("USE_GPU=true but PyTorch CUDA check failed: %s. Using CPU for torch/EasyOCR.", exc)
++        return False
++
++
++def torch_device() -> str:
++    return "cuda:0" if torch_cuda_available() else "cpu"
++
++
++def easyocr_gpu_enabled() -> bool:
++    """EasyOCR uses PyTorch, so this follows the PyTorch CUDA check."""
++    return torch_cuda_available()
++
++
++def onnxruntime_execution() -> Tuple[List[str], int, str]:
++    """Return providers, ctx_id, and device label for InsightFace/ONNXRuntime.
++
++    ctx_id=0  -> GPU
++    ctx_id=-1 -> CPU
++    """
++    cpu = (["CPUExecutionProvider"], -1, "CPU")
++
++    if not settings.use_gpu:
++        return cpu
++
++    try:
++        import onnxruntime as ort
++
++        # Safe no-op on versions/platforms where this helper does not exist.
++        if hasattr(ort, "preload_dlls"):
++            try:
++                ort.preload_dlls()
++            except Exception as exc:
++                logger.warning("ONNXRuntime CUDA DLL preload failed: %s", exc)
++
++        available = ort.get_available_providers()
++        if "CUDAExecutionProvider" in available:
++            return (["CUDAExecutionProvider", "CPUExecutionProvider"], 0, "GPU")
++
++        logger.warning(
++            "USE_GPU=true but CUDAExecutionProvider is not available in ONNXRuntime. "
++            "Available providers=%s. Using CPU for InsightFace.",
++            available,
++        )
++        return cpu
++    except Exception as exc:
++        logger.warning("USE_GPU=true but ONNXRuntime CUDA check failed: %s. Using CPU for InsightFace.", exc)
++        return cpu
+diff -ruN face-verification/src/models/adaface_backend.py face-verification-patched/src/models/adaface_backend.py
+--- face-verification/src/models/adaface_backend.py	2026-05-25 05:04:02.000000000 +0000
++++ face-verification-patched/src/models/adaface_backend.py	2026-05-25 22:20:30.467148576 +0000
+@@ -1,115 +1,123 @@
+-"""
+-AdaFace backend — quality-adaptive face recognition (CVPR 2022).
+-
+-Why upgrade from InsightFace/ArcFace?
+-  ArcFace applies the same gradient weight to every sample regardless of
+-  image quality.  AdaFace adapts its loss margin based on feature norm
+-  (a proxy for quality), so low-quality ID scans lose ~12% accuracy vs
+-  ~26% for ArcFace.
+-
+-Install:
+-    pip install torch torchvision adaface-pytorch
+-
+-Enable:
+-    FACE_MODEL_BACKEND=adaface   (in .env)
+-"""
+-
+-import logging
+-from typing import List
+-
+-import numpy as np
+-
+-from models.base import DetectedFace, FaceModelBackend
+-from core.config import settings
+-from core.exceptions import ModelLoadError
+-
+-logger = logging.getLogger(__name__)
+-
+-
+-class AdaFaceBackend(FaceModelBackend):
+-    """
+-    AdaFace IResNet embedding + InsightFace RetinaFace detection.
+-
+-    The two models are independent: you get InsightFace's best-in-class
+-    detector and AdaFace's more robust low-quality embeddings together.
+-
+-    Architectures:
+-        ir_50          ResNet-50,  MS1MV2   (~92 MB)
+-        ir_101         ResNet-101, MS1MV2   (~167 MB)  ← recommended
+-        ir_101_webface ResNet-101, WebFace4M (better demographic diversity)
+-    """
+-
+-    def __init__(self, arch: str = "ir_101"):
+-        import os
+-        self._arch = os.getenv("ADAFACE_ARCH", arch)
+-        self._adaface = None
+-        self._detector = None
+-
+-    def load(self) -> None:
+-        self._load_detector()
+-        self._load_adaface()
+-
+-    def _load_detector(self) -> None:
+-        try:
+-            from insightface.app import FaceAnalysis
+-            self._detector = FaceAnalysis(
+-                name="buffalo_l",
+-                allowed_modules=["detection"],
+-            )
+-            ctx_id = 0 if settings.use_gpu else -1
+-            self._detector.prepare(ctx_id=ctx_id, det_size=(640, 640))
+-            logger.info("AdaFace: RetinaFace detector loaded")
+-        except Exception as exc:
+-            raise ModelLoadError(f"AdaFace: detector failed: {exc}") from exc
+-
+-    def _load_adaface(self) -> None:
+-        try:
+-            from adaface import load_pretrained_model
+-            self._adaface = load_pretrained_model(self._arch)
+-            self._adaface.eval()
+-            logger.info("AdaFace embedding model loaded | arch=%s", self._arch)
+-        except ImportError as exc:
+-            raise ModelLoadError(
+-                "adaface-pytorch not installed.\n"
+-                "Run: pip install torch torchvision adaface-pytorch\n"
+-                f"Original: {exc}"
+-            ) from exc
+-        except Exception as exc:
+-            raise ModelLoadError(f"AdaFace: model load failed: {exc}") from exc
+-
+-    def _align_112(self, image: np.ndarray, kps: np.ndarray) -> np.ndarray:
+-        from insightface.utils import face_align
+-        return face_align.norm_crop(image, landmark=kps, image_size=112)
+-
+-    def _embed(self, face_112: np.ndarray) -> np.ndarray:
+-        import cv2
+-        import torch
+-        import torch.nn.functional as F
+-
+-        rgb    = cv2.cvtColor(face_112, cv2.COLOR_BGR2RGB)
+-        tensor = (
+-            torch.from_numpy(rgb).permute(2, 0, 1)
+-            .float().div(255.0).sub(0.5).div(0.5).unsqueeze(0)
+-        )
+-        with torch.no_grad():
+-            emb, _ = self._adaface(tensor)
+-        return F.normalize(emb, p=2, dim=1).squeeze(0).cpu().numpy()
+-
+-    def get_faces(self, image: np.ndarray) -> List[DetectedFace]:
+-        if self._detector is None or self._adaface is None:
+-            raise RuntimeError("Call load() before get_faces().")
+-        faces = []
+-        for f in self._detector.get(image):
+-            aligned  = self._align_112(image, f.kps)
+-            embedding = self._embed(aligned)
+-            faces.append(DetectedFace(
+-                embedding=embedding,
+-                det_score=float(f.det_score),
+-                bbox=np.array(f.bbox, dtype=np.float32),
+-                kps=np.array(f.kps, dtype=np.float32),
+-            ))
+-        return faces
+-
+-    @property
+-    def backend_name(self) -> str:
+-        return f"adaface/{self._arch}"
+\ No newline at end of file
++"""
++AdaFace backend — quality-adaptive face recognition (CVPR 2022).
++
++Why upgrade from InsightFace/ArcFace?
++  ArcFace applies the same gradient weight to every sample regardless of
++  image quality.  AdaFace adapts its loss margin based on feature norm
++  (a proxy for quality), so low-quality ID scans lose ~12% accuracy vs
++  ~26% for ArcFace.
++
++Install:
++    pip install torch torchvision adaface-pytorch
++
++Enable:
++    FACE_MODEL_BACKEND=adaface   (in .env)
++"""
++
++import logging
++from typing import List
++
++import numpy as np
++
++from models.base import DetectedFace, FaceModelBackend
++from core.device import onnxruntime_execution, torch_device
++from core.exceptions import ModelLoadError
++
++logger = logging.getLogger(__name__)
++
++
++class AdaFaceBackend(FaceModelBackend):
++    """
++    AdaFace IResNet embedding + InsightFace RetinaFace detection.
++
++    The two models are independent: you get InsightFace's best-in-class
++    detector and AdaFace's more robust low-quality embeddings together.
++
++    Architectures:
++        ir_50          ResNet-50,  MS1MV2   (~92 MB)
++        ir_101         ResNet-101, MS1MV2   (~167 MB)  ← recommended
++        ir_101_webface ResNet-101, WebFace4M (better demographic diversity)
++    """
++
++    def __init__(self, arch: str = "ir_101"):
++        import os
++        self._arch = os.getenv("ADAFACE_ARCH", arch)
++        self._adaface = None
++        self._detector = None
++        self._device = "cpu"
++        self._detector_device_label = "CPU"
++
++    def load(self) -> None:
++        self._load_detector()
++        self._load_adaface()
++
++    def _load_detector(self) -> None:
++        try:
++            from insightface.app import FaceAnalysis
++            providers, ctx_id, device_label = onnxruntime_execution()
++            self._detector_device_label = device_label
++
++            self._detector = FaceAnalysis(
++                name="buffalo_l",
++                allowed_modules=["detection"],
++                providers=providers,
++            )
++            self._detector.prepare(ctx_id=ctx_id, det_size=(640, 640))
++            logger.info("AdaFace: RetinaFace detector loaded | device=%s | providers=%s", device_label, providers)
++        except Exception as exc:
++            raise ModelLoadError(f"AdaFace: detector failed: {exc}") from exc
++
++    def _load_adaface(self) -> None:
++        try:
++            from adaface import load_pretrained_model
++            self._device = torch_device()
++            self._adaface = load_pretrained_model(self._arch)
++            self._adaface.to(self._device)
++            self._adaface.eval()
++            logger.info("AdaFace embedding model loaded | arch=%s | device=%s", self._arch, self._device)
++        except ImportError as exc:
++            raise ModelLoadError(
++                "adaface-pytorch not installed.\n"
++                "Run: pip install torch torchvision adaface-pytorch\n"
++                f"Original: {exc}"
++            ) from exc
++        except Exception as exc:
++            raise ModelLoadError(f"AdaFace: model load failed: {exc}") from exc
++
++    def _align_112(self, image: np.ndarray, kps: np.ndarray) -> np.ndarray:
++        from insightface.utils import face_align
++        return face_align.norm_crop(image, landmark=kps, image_size=112)
++
++    def _embed(self, face_112: np.ndarray) -> np.ndarray:
++        import cv2
++        import torch
++        import torch.nn.functional as F
++
++        rgb    = cv2.cvtColor(face_112, cv2.COLOR_BGR2RGB)
++        tensor = (
++            torch.from_numpy(rgb).permute(2, 0, 1)
++            .float().div(255.0).sub(0.5).div(0.5).unsqueeze(0)
++            .to(self._device)
++        )
++        with torch.no_grad():
++            emb, _ = self._adaface(tensor)
++        return F.normalize(emb, p=2, dim=1).squeeze(0).cpu().numpy()
++
++    def get_faces(self, image: np.ndarray) -> List[DetectedFace]:
++        if self._detector is None or self._adaface is None:
++            raise RuntimeError("Call load() before get_faces().")
++        faces = []
++        for f in self._detector.get(image):
++            aligned  = self._align_112(image, f.kps)
++            embedding = self._embed(aligned)
++            faces.append(DetectedFace(
++                embedding=embedding,
++                det_score=float(f.det_score),
++                bbox=np.array(f.bbox, dtype=np.float32),
++                kps=np.array(f.kps, dtype=np.float32),
++            ))
++        return faces
++
++    @property
++    def backend_name(self) -> str:
++        return f"adaface/{self._arch}/embedder={self._device}/detector={self._detector_device_label}"
+\ No newline at end of file
+diff -ruN face-verification/src/models/insightface_backend.py face-verification-patched/src/models/insightface_backend.py
+--- face-verification/src/models/insightface_backend.py	2026-05-25 05:10:26.000000000 +0000
++++ face-verification-patched/src/models/insightface_backend.py	2026-05-25 22:20:29.346233941 +0000
+@@ -1,41 +1,57 @@
+-import logging
+-from typing import List
+-import numpy as np
+-from models.base import DetectedFace, FaceModelBackend
+-from core.config import settings
+-from core.exceptions import ModelLoadError
+-
+-logger = logging.getLogger(__name__)
+-
+-class InsightFaceBackend(FaceModelBackend):
+-    def __init__(self, model_name: str = "buffalo_l"):
+-        self._model_name = model_name
+-        self._app = None
+-
+-    def load(self) -> None:
+-        try:
+-            from insightface.app import FaceAnalysis
+-            self._app = FaceAnalysis(name=self._model_name, allowed_modules=["detection", "recognition"])
+-            ctx_id = 0 if settings.use_gpu else -1
+-            self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+-            logger.info("InsightFace loaded | model=%s | device=%s", self._model_name, "GPU" if settings.use_gpu else "CPU")
+-        except Exception as exc:
+-            raise ModelLoadError(f"Failed to load InsightFace '{self._model_name}': {exc}") from exc
+-
+-    def get_faces(self, image: np.ndarray) -> List[DetectedFace]:
+-        if self._app is None:
+-            raise RuntimeError("Call load() before get_faces().")
+-        return [
+-            DetectedFace(
+-                embedding=np.array(f.embedding, dtype=np.float32),
+-                det_score=float(f.det_score),
+-                bbox=np.array(f.bbox, dtype=np.float32),
+-                kps=np.array(f.kps, dtype=np.float32),
+-            )
+-            for f in self._app.get(image)
+-            if f.embedding is not None
+-        ]
+-
+-    @property
+-    def backend_name(self) -> str:
+-        return f"insightface/{self._model_name}"
+\ No newline at end of file
++import logging
++from typing import List
++import numpy as np
++from models.base import DetectedFace, FaceModelBackend
++from core.device import onnxruntime_execution
++from core.exceptions import ModelLoadError
++
++logger = logging.getLogger(__name__)
++
++
++class InsightFaceBackend(FaceModelBackend):
++    def __init__(self, model_name: str = "buffalo_l"):
++        self._model_name = model_name
++        self._app = None
++        self._device_label = "CPU"
++
++    def load(self) -> None:
++        try:
++            from insightface.app import FaceAnalysis
++
++            providers, ctx_id, device_label = onnxruntime_execution()
++            self._device_label = device_label
++
++            self._app = FaceAnalysis(
++                name=self._model_name,
++                allowed_modules=["detection", "recognition"],
++                providers=providers,
++            )
++            self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
++
++            logger.info(
++                "InsightFace loaded | model=%s | device=%s | providers=%s | ctx_id=%s",
++                self._model_name,
++                device_label,
++                providers,
++                ctx_id,
++            )
++        except Exception as exc:
++            raise ModelLoadError(f"Failed to load InsightFace '{self._model_name}': {exc}") from exc
++
++    def get_faces(self, image: np.ndarray) -> List[DetectedFace]:
++        if self._app is None:
++            raise RuntimeError("Call load() before get_faces().")
++        return [
++            DetectedFace(
++                embedding=np.array(f.embedding, dtype=np.float32),
++                det_score=float(f.det_score),
++                bbox=np.array(f.bbox, dtype=np.float32),
++                kps=np.array(f.kps, dtype=np.float32),
++            )
++            for f in self._app.get(image)
++            if f.embedding is not None
++        ]
++
++    @property
++    def backend_name(self) -> str:
++        return f"insightface/{self._model_name}/{self._device_label}"
+diff -ruN face-verification/src/quality/validators/document_validator.py face-verification-patched/src/quality/validators/document_validator.py
+--- face-verification/src/quality/validators/document_validator.py	2026-05-25 05:51:12.000000000 +0000
++++ face-verification-patched/src/quality/validators/document_validator.py	2026-05-25 22:20:30.581234457 +0000
+@@ -1,52 +1,55 @@
+-import cv2
+-import easyocr
+-import numpy as np
+-from quality.quality_enums import ValidationResult
+-from core.config import settings
+-
+-class DocumentValidator:
+-    """
+-    Validates that an image contains enough text to be considered an ID document.
+-    Uses EasyOCR to detect text boxes.
+-    """
+-    def __init__(self, min_text_confidence: float = 0.5, min_text_boxes: int = 2):
+-        # Initialize the reader once for better performance
+-        # Supports Arabic ('ar') and English ('en') – change as needed
+-        self.reader = easyocr.Reader(['ar', 'en'])
+-        self.min_confidence = min_text_confidence
+-        self.min_text_boxes = min_text_boxes
+-
+-    def validate(self, image, face=None, image_type: str = "selfie") -> ValidationResult:
+-        # Only apply this validation to the ID (document) image
+-        if image_type != "document":
+-            return ValidationResult(passed=True)
+-
+-        # Convert BGR (OpenCV) to RGB (EasyOCR expects RGB)
+-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+-
+-        # Run OCR
+-        results = self.reader.readtext(rgb, paragraph=False)
+-
+-        # Filter results by confidence
+-        detected_texts = [
+-            text for (bbox, text, conf) in results if conf >= self.min_confidence
+-        ]
+-
+-        if len(detected_texts) < self.min_text_boxes:
+-            return ValidationResult(
+-                passed=False,
+-                code="NOT_A_DOCUMENT",
+-                message=(
+-                    "The uploaded image does not contain enough text (not an ID document). "
+-                    "Please upload a clear photo of your ID document."
+-                ),
+-                metrics={
+-                    "text_boxes_found": len(detected_texts),
+-                    "required": self.min_text_boxes
+-                }
+-            )
+-
+-        return ValidationResult(
+-            passed=True,
+-            metrics={"text_boxes_found": len(detected_texts)}
+-        )
+\ No newline at end of file
++import cv2
++from quality.quality_enums import ValidationResult
++from core.device import easyocr_gpu_enabled
++
++
++class DocumentValidator:
++    """
++    Validates that an image contains enough text to be considered an ID document.
++    Uses EasyOCR to detect text boxes.
++    """
++
++    def __init__(self, min_text_confidence: float = 0.5, min_text_boxes: int = 2):
++        # Lazy import so Streamlit starts faster and device selection is already configured.
++        import easyocr
++
++        # EasyOCR uses PyTorch. USE_GPU=false forces gpu=False.
++        # USE_GPU=true uses gpu=True only when torch.cuda.is_available() is True.
++        self.reader = easyocr.Reader(['ar', 'en'], gpu=easyocr_gpu_enabled())
++        self.min_confidence = min_text_confidence
++        self.min_text_boxes = min_text_boxes
++
++    def validate(self, image, face=None, image_type: str = "selfie") -> ValidationResult:
++        # Only apply this validation to the ID (document) image
++        if image_type != "document":
++            return ValidationResult(passed=True)
++
++        # Convert BGR (OpenCV) to RGB (EasyOCR expects RGB)
++        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
++
++        # Run OCR
++        results = self.reader.readtext(rgb, paragraph=False)
++
++        # Filter results by confidence
++        detected_texts = [
++            text for (bbox, text, conf) in results if conf >= self.min_confidence
++        ]
++
++        if len(detected_texts) < self.min_text_boxes:
++            return ValidationResult(
++                passed=False,
++                code="NOT_A_DOCUMENT",
++                message=(
++                    "The uploaded image does not contain enough text (not an ID document). "
++                    "Please upload a clear photo of your ID document."
++                ),
++                metrics={
++                    "text_boxes_found": len(detected_texts),
++                    "required": self.min_text_boxes
++                }
++            )
++
++        return ValidationResult(
++            passed=True,
++            metrics={"text_boxes_found": len(detected_texts)}
++        )
+diff -ruN face-verification/streamlit_app/app.py face-verification-patched/streamlit_app/app.py
+--- face-verification/streamlit_app/app.py	2026-05-25 05:41:18.000000000 +0000
++++ face-verification-patched/streamlit_app/app.py	2026-05-25 22:20:54.289831270 +0000
+@@ -1,87 +1,94 @@
+-from pathlib import Path
+-import sys
+-
+-# Add the project root and src/ to Python path
+-PROJECT_ROOT = Path(__file__).resolve().parent.parent   # goes up one level from streamlit_app/
+-SRC_DIR = PROJECT_ROOT / "src"
+-if str(SRC_DIR) not in sys.path:
+-    sys.path.insert(0, str(SRC_DIR))
+-
+-import streamlit as st
+-from services.FaceVerificationService import FaceVerificationService
+-from helpers.image import bytes_to_cv2_image
+-from core.config import settings
+-from core.exceptions import (
+-    ImageValidationError, QualityCheckError,
+-    NoFaceDetectedError, DuplicateImageError,
+-    EmbeddingExtractionError, FaceVerificationError,
+-)
+-
+-st.set_page_config(page_title="Face Verification v2", page_icon="🪪", layout="centered")
+-st.title("🪪 Face Verification — v2")
+-st.caption(f"Backend: **{settings.model_backend}/{settings.model_name}** | Threshold: **{settings.similarity_threshold}** | Gray zone: **{settings.manual_review_threshold} – {settings.similarity_threshold}**")
+-
+-@st.cache_resource(show_spinner="Loading face model…")
+-def load_service():
+-    return FaceVerificationService()
+-
+-service = load_service()
+-
+-col1, col2 = st.columns(2)
+-with col1:
+-    id_file = st.file_uploader("Upload ID Photo", type=["jpg", "jpeg", "png", "webp"])
+-    if id_file:
+-        st.image(id_file, caption="ID Image", use_container_width=True)
+-
+-with col2:
+-    selfie_file = st.file_uploader("Upload Selfie", type=["jpg", "jpeg", "png", "webp"])
+-    if selfie_file:
+-        st.image(selfie_file, caption="Selfie", use_container_width=True)
+-
+-if st.button("🔍 Verify Faces", use_container_width=True, type="primary"):
+-    if not id_file or not selfie_file:
+-        st.warning("Please upload both the ID photo and the selfie.")
+-    else:
+-        with st.spinner("Analysing…"):
+-            try:
+-                id_img = bytes_to_cv2_image(id_file.getvalue(), label="ID image")
+-                selfie_img = bytes_to_cv2_image(selfie_file.getvalue(), label="selfie")
+-                result = service.verify_faces(id_img, selfie_img)
+-
+-                st.divider()
+-                st.subheader("Result")
+-                verdict = result["verdict"]
+-                similarity = result["similarity"]
+-
+-                if verdict == "VERIFIED":
+-                    st.success(f"✅ **VERIFIED** — Similarity: `{similarity}`")
+-                elif verdict == "MANUAL_REVIEW":
+-                    st.warning(f"⚠️ **MANUAL REVIEW REQUIRED** — Similarity: `{similarity}`\n\nScore is in the gray zone. Route to a human reviewer.")
+-                else:
+-                    st.error(f"❌ **REJECTED** — Similarity: `{similarity}`")
+-
+-                st.progress(min(max(float(similarity), 0.0), 1.0), text=f"Similarity score: {similarity}")
+-                for w in result.get("warnings", []):
+-                    st.info(f"ℹ️ {w}")
+-
+-                with st.expander("Details"):
+-                    cols = st.columns(2)
+-                    cols[0].metric("ID det_score", result["id_det_score"])
+-                    cols[1].metric("Selfie det_score", result["selfie_det_score"])
+-                    cols[0].metric("Threshold", result["threshold"])
+-                    cols[1].metric("Manual review threshold", result["manual_review_threshold"])
+-                    st.caption(f"Model: `{result['model']}`")
+-
+-                with st.expander("Quality metrics"):
+-                    st.json(result.get("quality_metrics", {}))
+-
+-            except (ImageValidationError, NoFaceDetectedError) as e:
+-                st.error(f"📷 {e}")
+-            except QualityCheckError as e:
+-                st.error(f"🔍 Quality check failed: {e}")
+-                if e.metrics:
+-                    st.json(e.metrics)
+-            except DuplicateImageError as e:
+-                st.error(f"⚠️ {e}")
+-            except Exception as e:
++from pathlib import Path
++import sys
++
++# Add the project root and src/ to Python path
++PROJECT_ROOT = Path(__file__).resolve().parent.parent   # goes up one level from streamlit_app/
++SRC_DIR = PROJECT_ROOT / "src"
++if str(SRC_DIR) not in sys.path:
++    sys.path.insert(0, str(SRC_DIR))
++
++import streamlit as st
++from services.FaceVerificationService import FaceVerificationService
++from helpers.image import bytes_to_cv2_image
++from core.config import settings
++from core.exceptions import (
++    ImageValidationError, QualityCheckError,
++    NoFaceDetectedError, DuplicateImageError,
++    EmbeddingExtractionError, FaceVerificationError,
++)
++
++st.set_page_config(page_title="Face Verification v2", page_icon="🪪", layout="centered")
++st.title("🪪 Face Verification — v2")
++st.caption(
++    f"Backend: **{settings.model_backend}/{settings.model_name}** | "
++    f"USE_GPU: **{settings.use_gpu}** | "
++    f"Threshold: **{settings.similarity_threshold}** | "
++    f"Gray zone: **{settings.manual_review_threshold} – {settings.similarity_threshold}**"
++)
++
++@st.cache_resource(show_spinner="Loading face model…")
++def load_service(use_gpu: bool, backend_name: str, model_name: str):
++    # Parameters are used as Streamlit cache keys.
++    # If you restart with a different .env value, Streamlit will not reuse the wrong model.
++    return FaceVerificationService()
++
++service = load_service(settings.use_gpu, settings.model_backend, settings.model_name)
++
++col1, col2 = st.columns(2)
++with col1:
++    id_file = st.file_uploader("Upload ID Photo", type=["jpg", "jpeg", "png", "webp"])
++    if id_file:
++        st.image(id_file, caption="ID Image", use_container_width=True)
++
++with col2:
++    selfie_file = st.file_uploader("Upload Selfie", type=["jpg", "jpeg", "png", "webp"])
++    if selfie_file:
++        st.image(selfie_file, caption="Selfie", use_container_width=True)
++
++if st.button("🔍 Verify Faces", use_container_width=True, type="primary"):
++    if not id_file or not selfie_file:
++        st.warning("Please upload both the ID photo and the selfie.")
++    else:
++        with st.spinner("Analysing…"):
++            try:
++                id_img = bytes_to_cv2_image(id_file.getvalue(), label="ID image")
++                selfie_img = bytes_to_cv2_image(selfie_file.getvalue(), label="selfie")
++                result = service.verify_faces(id_img, selfie_img)
++
++                st.divider()
++                st.subheader("Result")
++                verdict = result["verdict"]
++                similarity = result["similarity"]
++
++                if verdict == "VERIFIED":
++                    st.success(f"✅ **VERIFIED** — Similarity: `{similarity}`")
++                elif verdict == "MANUAL_REVIEW":
++                    st.warning(f"⚠️ **MANUAL REVIEW REQUIRED** — Similarity: `{similarity}`\n\nScore is in the gray zone. Route to a human reviewer.")
++                else:
++                    st.error(f"❌ **REJECTED** — Similarity: `{similarity}`")
++
++                st.progress(min(max(float(similarity), 0.0), 1.0), text=f"Similarity score: {similarity}")
++                for w in result.get("warnings", []):
++                    st.info(f"ℹ️ {w}")
++
++                with st.expander("Details"):
++                    cols = st.columns(2)
++                    cols[0].metric("ID det_score", result["id_det_score"])
++                    cols[1].metric("Selfie det_score", result["selfie_det_score"])
++                    cols[0].metric("Threshold", result["threshold"])
++                    cols[1].metric("Manual review threshold", result["manual_review_threshold"])
++                    st.caption(f"Model: `{result['model']}`")
++
++                with st.expander("Quality metrics"):
++                    st.json(result.get("quality_metrics", {}))
++
++            except (ImageValidationError, NoFaceDetectedError) as e:
++                st.error(f"📷 {e}")
++            except QualityCheckError as e:
++                st.error(f"🔍 Quality check failed: {e}")
++                if e.metrics:
++                    st.json(e.metrics)
++            except DuplicateImageError as e:
++                st.error(f"⚠️ {e}")
++            except Exception as e:
+                 st.error(f"Unexpected error: {e}")
+\ No newline at end of file

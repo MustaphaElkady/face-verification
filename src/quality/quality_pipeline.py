@@ -4,6 +4,7 @@ from quality.validators.brightness_validator import BrightnessValidator
 from quality.validators.face_size_validator import FaceSizeValidator
 from quality.validators.glare_validator import GlareValidator
 from quality.validators.occlusion_validator import OcclusionValidator
+from quality.validators.document_validator import DocumentValidator
 
 @dataclass(frozen=True)
 class QualityResult:
@@ -14,7 +15,7 @@ class QualityResult:
 
 class QualityPipeline:
     def __init__(self):
-        self._image_validators = [BlurValidator(), BrightnessValidator(), GlareValidator()]
+        self._image_validators = [BlurValidator(), BrightnessValidator(), GlareValidator(), DocumentValidator() ]
         self._face_validators = [FaceSizeValidator(), OcclusionValidator()]
 
     def validate_image(self, image, image_type: str = "selfie") -> QualityResult:

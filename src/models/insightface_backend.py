@@ -11,17 +11,30 @@ class InsightFaceBackend(FaceModelBackend):
     def __init__(self, model_name: str = "buffalo_l"):
         self._model_name = model_name
         self._app = None
-
     def load(self) -> None:
         try:
             from insightface.app import FaceAnalysis
-            self._app = FaceAnalysis(name=self._model_name, allowed_modules=["detection", "recognition"])
-            ctx_id = 0 if settings.use_gpu else -1
+            from core.device import onnxruntime_execution
+
+            providers, ctx_id, device_label = onnxruntime_execution()
+
+            self._app = FaceAnalysis(
+                name=self._model_name,
+                allowed_modules=["detection", "recognition"],
+                providers=providers,
+            )
+
             self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-            logger.info("InsightFace loaded | model=%s | device=%s", self._model_name, "GPU" if settings.use_gpu else "CPU")
+
+            logger.info(
+                "InsightFace loaded | model=%s | device=%s | providers=%s",
+                self._model_name,
+                device_label,
+                providers,
+            )
+
         except Exception as exc:
             raise ModelLoadError(f"Failed to load InsightFace '{self._model_name}': {exc}") from exc
-
     def get_faces(self, image: np.ndarray) -> List[DetectedFace]:
         if self._app is None:
             raise RuntimeError("Call load() before get_faces().")

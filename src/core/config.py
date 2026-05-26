@@ -10,7 +10,7 @@ class Settings:
     # Model
     model_backend: str = os.getenv("FACE_MODEL_BACKEND", "insightface")
     model_name: str = os.getenv("FACE_MODEL_NAME", "buffalo_l")
-    use_gpu: bool = os.getenv("USE_GPU", "false").lower() == "true"
+    use_gpu: bool = os.getenv("USE_GPU", "false").strip().lower() in ("1", "true", "yes", "y", "on")
 
     # Thresholds
     similarity_threshold: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.57"))
